@@ -5,6 +5,7 @@ Echo Compass - 音频设备管理器
 """
 
 import numpy as np
+import traceback
 
 
 class AudioDeviceManager:
@@ -23,6 +24,7 @@ class AudioDeviceManager:
         self._devices = []
         self._selected_device = None
         self._is_initialized = False
+        self._error_message = ""
     
     def initialize(self):
         """初始化音频设备管理器"""
@@ -33,37 +35,58 @@ class AudioDeviceManager:
             self._is_initialized = True
             return True
         except ImportError:
+            self._error_message = "错误: soundcard 库未安装，请运行 pip install soundcard"
             return False
-        except Exception:
+        except Exception as e:
+            self._error_message = f"错误: 初始化音频管理器失败 - {str(e)}"
             return False
+    
+    def get_error_message(self):
+        """获取错误信息"""
+        return self._error_message
     
     def _scan_devices(self):
         """扫描所有音频设备"""
         self._devices = []
+        self._error_message = ""
         
         try:
             all_mics = self._soundcard.all_microphones(include_loopback=True)
             
+            if not all_mics:
+                self._error_message = "警告: 未检测到任何音频设备"
+                return
+            
             for device in all_mics:
-                self._devices.append({
-                    'name': device.name,
-                    'id': device.id,
-                    'is_loopback': device.isloopback,
-                    'channels': device.channels,
-                    'samplerate': device.samplerate,
-                    'is_default_speaker': False,
-                    'device_obj': device,
-                })
+                try:
+                    samplerate = getattr(device, 'samplerate', 48000)
+                    self._devices.append({
+                        'name': device.name,
+                        'id': device.id,
+                        'is_loopback': device.isloopback,
+                        'channels': device.channels,
+                        'samplerate': samplerate,
+                        'is_default_speaker': False,
+                        'device_obj': device,
+                    })
+                except Exception as e:
+                    print(f"警告: 无法读取设备信息 - {e}")
+                    pass
             
             try:
                 default_speaker = self._soundcard.default_speaker()
+                speaker_name = default_speaker.name
+                
                 for dev in self._devices:
-                    if dev['name'] == default_speaker.name:
+                    if dev['name'] == speaker_name:
                         dev['is_default_speaker'] = True
                         break
-            except Exception:
+            except Exception as e:
+                self._error_message = f"警告: 无法获取默认扬声器 - {str(e)}"
                 pass
-        except Exception:
+        except Exception as e:
+            self._error_message = f"错误: 扫描设备失败 - {str(e)}"
+            traceback.print_exc()
             pass
     
     def get_devices(self):
@@ -79,6 +102,7 @@ class AudioDeviceManager:
         loopback_devices = self.get_loopback_devices()
         
         if not loopback_devices:
+            self._error_message = "错误: 未找到任何 loopback 设备，请检查音频输出设备是否正常"
             return None
         
         try:
@@ -92,6 +116,10 @@ class AudioDeviceManager:
         
         for dev in loopback_devices:
             if 'headphone' in dev['name'].lower() or '耳机' in dev['name']:
+                return dev
+        
+        for dev in loopback_devices:
+            if 'speaker' in dev['name'].lower() or '扬声器' in dev['name']:
                 return dev
         
         for dev in loopback_devices:
@@ -115,6 +143,7 @@ class AudioDeviceManager:
     def create_recorder(self, sample_rate=48000, block_ms=10):
         """创建音频录制器"""
         if not self._is_initialized:
+            self._error_message = "错误: 音频管理器未初始化"
             return None
         
         if self._selected_device is None:
@@ -131,7 +160,9 @@ class AudioDeviceManager:
                 channels=self._selected_device['channels'],
                 blocksize=blocksize
             )
-        except Exception:
+        except Exception as e:
+            self._error_message = f"错误: 创建录制器失败 - {str(e)}"
+            traceback.print_exc()
             return None
     
     def get_device_info(self):
@@ -146,6 +177,23 @@ class AudioDeviceManager:
             'is_loopback': self._selected_device['is_loopback'],
             'is_default_speaker': self._selected_device['is_default_speaker'],
         }
+    
+    def debug_info(self):
+        """获取调试信息"""
+        info = []
+        info.append(f"初始化状态: {self._is_initialized}")
+        info.append(f"设备总数: {len(self._devices)}")
+        
+        loopback = self.get_loopback_devices()
+        info.append(f"Loopback设备数: {len(loopback)}")
+        
+        for i, dev in enumerate(self._devices):
+            info.append(f"  设备 {i}: {dev['name']} (channels={dev['channels']}, is_loopback={dev['is_loopback']}, is_default={dev['is_default_speaker']})")
+        
+        if self._error_message:
+            info.append(f"错误信息: {self._error_message}")
+        
+        return "\n".join(info)
 
 
 class Virtual71Decoder:

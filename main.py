@@ -238,16 +238,23 @@ class AudioCaptureThread(threading.Thread):
         virtual_decoder = Virtual71Decoder()
         
         if not audio_manager.initialize():
-            self._status('错误: 无法初始化音频管理器')
+            error = audio_manager.get_error_message()
+            self._status(f'错误: 无法初始化音频管理器 - {error}')
             return
         
-        devices = audio_manager.get_loopback_devices()
-        if devices:
-            self._status(f'检测到 {len(devices)} 个音频输出设备')
+        all_devices = audio_manager.get_devices()
+        loopback_devices = audio_manager.get_loopback_devices()
+        
+        self._status(f'检测到 {len(all_devices)} 个音频设备, {len(loopback_devices)} 个输出设备')
+        
+        if loopback_devices:
+            for i, dev in enumerate(loopback_devices):
+                self._status(f'  输出设备 {i}: {dev["name"]} ({dev["channels"]}声道)')
         
         best_device = audio_manager.get_best_device()
         if best_device is None:
-            self._status('错误: 未找到可用的音频捕获设备')
+            error = audio_manager.get_error_message()
+            self._status(f'错误: 未找到可用的音频捕获设备 - {error}')
             return
         
         audio_manager.select_device(best_device['id'])
@@ -269,7 +276,8 @@ class AudioCaptureThread(threading.Thread):
 
         rec = audio_manager.create_recorder(sample_rate=self.sample_rate, block_ms=BLOCK_MS)
         if rec is None:
-            self._status('错误: 无法创建音频录制器')
+            error = audio_manager.get_error_message()
+            self._status(f'错误: 无法创建音频录制器 - {error}')
             return
 
         try:
