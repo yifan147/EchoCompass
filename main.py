@@ -26,14 +26,12 @@ from echo_compass.web_radar import WebRadarServer, get_local_ip
 
 
 SAMPLE_RATE = 48000
-BLOCK_MS = 50  # 每块 50ms
-UPDATE_HZ = 20  # UI 刷新率
-# 光点保持时间按类型分（秒）：声音停止后光点保留多久才熄灭
-# 脚步是 50ms 小块，保持短了看着像没显示，给长一点成持续点；枪声连发自己刷新，短一点
-HOLD_SEC_FOOTSTEP = 0.6
-HOLD_SEC_GUNSHOT = 0.25
-ENV_RELEASE = 0.70   # 能量包络回落系数（每块），越大衰减越慢、显示越稳
-ANGLE_SMOOTH = 0.5   # 角度平滑系数 0~1，越小越稳但越滞后
+BLOCK_MS = 10  # 每块 10ms，降低延迟
+UPDATE_HZ = 60  # UI 刷新率，提升响应速度
+HOLD_SEC_FOOTSTEP = 0.3
+HOLD_SEC_GUNSHOT = 0.15
+ENV_RELEASE = 0.80
+ANGLE_SMOOTH = 0.3
 
 # 削顶保护：起音块波形峰值超过此值，认为削顶，左右响度差不可信，
 # 这一发不重新锁方向，沿用上次角度

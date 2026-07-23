@@ -263,27 +263,23 @@ ILD_DEG_PER_DB = 8
 ILD_HF_MIN_RATIO = 0.05
 
 
-def _highpass_fft(signal, sample_rate, cutoff_hz):
-    """简单 FFT 高通滤波：把 cutoff_hz 以下的频率成分置零。"""
+def _simple_highpass(signal, cutoff_hz, sample_rate):
+    """简化的高通滤波：使用一阶差分近似，避免FFT的性能开销"""
     n = len(signal)
-    if n < 4:
+    if n < 2:
         return signal.astype(np.float64)
-    spectrum = np.fft.rfft(signal)
-    freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
-    spectrum[freqs < cutoff_hz] = 0.0
-    return np.fft.irfft(spectrum, n=n)
+    result = np.zeros(n, dtype=np.float64)
+    result[0] = signal[0]
+    rc = 1.0 / (2 * np.pi * cutoff_hz / sample_rate)
+    alpha = rc / (rc + 1.0)
+    for i in range(1, n):
+        result[i] = alpha * result[i-1] + alpha * (signal[i] - signal[i-1])
+    return result
 
 
-def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=5):
+def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=3):
     """
-    双耳方向计算：高频 ILD 为主，ITD 只用于置信度
-
-    学人耳做法：
-      - 方向只看最开头那一下直达声（起音后 ~5ms 小窗口）
-      - ILD 只用高频部分（高通滤波后），因为低频绕头走两耳差不多响，
-        会把左右差值稀释掉。差值换算成 dB，每 dB 映射 ILD_DEG_PER_DB 度。
-      - 高频能量太少（远距离闷声）时退回全频段算，置信度降低。
-      - ITD 不掺入角度（枪声低频为主，互相关不可靠），只给置信度加减。
+    双耳方向计算：高频 ILD 为主，简化计算降低延迟
 
     参数:
         audio_block: (n_samples, 2) 立体声音频
@@ -302,37 +298,31 @@ def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=5):
 
     n_samples = len(left)
 
-    # ---- 找起音点（能量跳变） ----
-    # 用短窗能量包络找第一个跳变点
-    win_size = max(1, sample_rate // 1000)  # 1ms 窗
+    # ---- 找起音点 ----
+    win_size = max(1, sample_rate // 1000)
     n_windows = n_samples // win_size
 
-    if n_windows < 2:
-        # 块太小，用整块
-        onset_idx = 0
-    else:
+    onset_idx = 0
+    if n_windows >= 2:
         energies = np.zeros(n_windows)
         for i in range(n_windows):
             s = i * win_size
             e = s + win_size
             energies[i] = np.sqrt(np.mean(left[s:e]**2 + right[s:e]**2))
 
-        # 找能量跳变点：第一个能量 > 平均能量 * 3 的位置
-        avg_e = np.mean(energies[:max(1, n_windows//4)])  # 前 1/4 当背景
+        avg_e = np.mean(energies[:max(1, n_windows//4)])
         threshold = max(avg_e * 3, 1e-6)
 
-        onset_idx = 0
         for i in range(n_windows):
             if energies[i] > threshold:
                 onset_idx = i * win_size
                 break
 
-    # ---- 只取起音后 ~5ms 的小窗口 ----
+    # ---- 只取起音后小窗口 ----
     window_samples = int(sample_rate * onset_window_ms / 1000)
     end_idx = min(onset_idx + window_samples, n_samples)
 
     if end_idx - onset_idx < win_size:
-        # 窗口太小，用整块
         onset_idx = 0
         end_idx = n_samples
 
@@ -343,7 +333,6 @@ def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=5):
         return 0.0, 0.0
 
     # ---- ILD: 高频强度差 ----
-    # 全频段 RMS（兜底用 + 算高频占比）
     e_left_full = np.sqrt(np.mean(left_win ** 2))
     e_right_full = np.sqrt(np.mean(right_win ** 2))
     full_energy = e_left_full + e_right_full
@@ -351,14 +340,13 @@ def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=5):
     if full_energy < 1e-10:
         return 0.0, 0.0
 
-    # 高通滤波后 RMS
-    left_hp = _highpass_fft(left_win, sample_rate, ILD_HIGHPASS_HZ)
-    right_hp = _highpass_fft(right_win, sample_rate, ILD_HIGHPASS_HZ)
+    # 简化高通滤波
+    left_hp = _simple_highpass(left_win, ILD_HIGHPASS_HZ, sample_rate)
+    right_hp = _simple_highpass(right_win, ILD_HIGHPASS_HZ, sample_rate)
     e_left_hp = np.sqrt(np.mean(left_hp ** 2))
     e_right_hp = np.sqrt(np.mean(right_hp ** 2))
     hf_energy = e_left_hp + e_right_hp
 
-    # 高频占比太低（声音闷/远距离）→ 退回全频段兜底
     hf_ratio = hf_energy / (full_energy + 1e-10)
     use_hf = hf_ratio >= ILD_HF_MIN_RATIO
 
@@ -369,72 +357,15 @@ def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=5):
         e_left_use = e_left_full
         e_right_use = e_right_full
 
-    # dB 差：正 = 右响 → 声源在右 → 正角度
     db_left = 20 * np.log10(e_left_use + 1e-10)
     db_right = 20 * np.log10(e_right_use + 1e-10)
     db_diff = db_right - db_left
 
-    # 每 dB 映射 ILD_DEG_PER_DB 度，±90° 封顶
     angle = float(np.clip(db_diff * ILD_DEG_PER_DB, -90.0, 90.0))
 
-    # ---- ITD: 时间差 (互相关) —— 只用于置信度，不掺入角度 ----
-    # 搜索范围: ±MAX_ITD 秒 → ±max_lag 个采样点
-    max_lag = int(MAX_ITD * sample_rate) + 1  # ≈ 25 samples @ 48kHz
-
-    left_norm = left_win - np.mean(left_win)
-    right_norm = right_win - np.mean(right_win)
-    left_std = np.std(left_norm)
-    right_std = np.std(right_norm)
-
-    use_itd = False
-    angle_itd = 0.0
-
-    if left_std >= 1e-10 and right_std >= 1e-10:
-        left_norm = left_norm / left_std
-        right_norm = right_norm / right_std
-
-        # 互相关: 找 right 相对 left 的延迟
-        correlations = []
-        lags = []
-        for lag in range(-max_lag, max_lag + 1):
-            if lag > 0:
-                corr = np.mean(left_norm[lag:] * right_norm[:-lag])
-            elif lag < 0:
-                corr = np.mean(left_norm[:lag] * right_norm[-lag:])
-            else:
-                corr = np.mean(left_norm * right_norm)
-            correlations.append(corr)
-            lags.append(lag)
-
-        correlations = np.array(correlations)
-        best_idx = np.argmax(correlations)
-        best_corr = correlations[best_idx]
-        best_lag = lags[best_idx]
-
-        # ITD 可靠性检查：峰值是否明显高于平均
-        mean_corr = np.mean(correlations)
-        std_corr = np.std(correlations)
-
-        if std_corr > 1e-10 and (best_corr - mean_corr) >= 2 * std_corr:
-            use_itd = True
-            # lag → 时间 → 角度（仅用于置信度方向一致性判断）
-            itd_seconds = best_lag / sample_rate
-            itd_ratio = np.clip(itd_seconds / MAX_ITD, -1.0, 1.0)
-            angle_itd = float(np.degrees(np.arcsin(itd_ratio)))
-
     # ---- 置信度 ----
-    # 基础来自 ILD 的 dB 差：差越大越自信，10dB 差满置信度
     confidence = min(1.0, abs(db_diff) / 10.0)
 
-    if use_itd:
-        if (angle_itd > 0) == (angle > 0):
-            # ITD 与 ILD 同向，加分
-            confidence = min(1.0, confidence + 0.2)
-        else:
-            # 方向冲突，扣分
-            confidence = max(0.0, confidence - 0.3)
-
-    # 兜底（全频段算的）置信度降低
     if not use_hf:
         confidence *= 0.6
 

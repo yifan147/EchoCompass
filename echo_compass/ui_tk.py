@@ -25,6 +25,116 @@ COLORS = {
 }
 
 
+class EdgeDisplay(tk.Canvas):
+    """
+    屏幕上边缘 8 方位显示条
+    
+    8 个方位：前、前右、右、后右、后、后左、左、前左
+    根据声音强弱动态显示条形高度，颜色区分声音类型
+    """
+    
+    DIRECTIONS = [
+        {'name': '前', 'angle': 0},
+        {'name': '前右', 'angle': 45},
+        {'name': '右', 'angle': 90},
+        {'name': '后右', 'angle': 135},
+        {'name': '后', 'angle': 180},
+        {'name': '后左', 'angle': 225},
+        {'name': '左', 'angle': 270},
+        {'name': '前左', 'angle': 315},
+    ]
+    
+    def __init__(self, parent, height=60, **kwargs):
+        super().__init__(parent, height=height, bg=COLORS['bg'], 
+                         highlightthickness=0, **kwargs)
+        self.height = height
+        self._current_data = CompassData()
+        self._energy_history = [0.0] * 8
+        self._draw_static()
+    
+    def _draw_static(self):
+        """画静态元素"""
+        self.delete('all')
+        width = self.winfo_width()
+        if width <= 0:
+            width = 400
+        
+        bar_width = width // len(self.DIRECTIONS)
+        gap = 2
+        
+        for i, dir_info in enumerate(self.DIRECTIONS):
+            x = i * bar_width
+            self.create_text(x + bar_width // 2, self.height - 10,
+                            text=dir_info['name'], fill=COLORS['text_dim'],
+                            font=('Arial', 8))
+    
+    def _angle_to_index(self, angle):
+        """将角度（0~360）映射到 8 个方位索引"""
+        while angle < 0:
+            angle += 360
+        while angle >= 360:
+            angle -= 360
+        idx = int((angle + 22.5) % 360 // 45)
+        return idx
+    
+    def update_data(self, data: CompassData):
+        """更新显示数据"""
+        self._current_data = data
+        self._redraw()
+    
+    def _redraw(self):
+        """重绘动态元素"""
+        width = self.winfo_width()
+        if width <= 0:
+            width = 400
+        
+        bar_width = width // len(self.DIRECTIONS)
+        gap = 2
+        
+        self.delete('bar')
+        
+        if self._current_data.has_sound:
+            idx = self._angle_to_index(self._current_data.angle)
+            energy = self._current_data.energy
+            
+            for i in range(len(self.DIRECTIONS)):
+                if i == idx:
+                    self._energy_history[i] = max(self._energy_history[i] * 0.7, energy)
+                else:
+                    self._energy_history[i] *= 0.7
+            
+            for i, dir_info in enumerate(self.DIRECTIONS):
+                x = i * bar_width
+                bar_height = int(self._energy_history[i] * (self.height - 25))
+                
+                if bar_height > 0:
+                    if self._current_data.sound_type == SOUND_TYPE_FOOTSTEP:
+                        color = COLORS['footstep']
+                    elif self._current_data.sound_type == SOUND_TYPE_GUNSHOT:
+                        color = COLORS['gunshot']
+                    else:
+                        color = COLORS['other']
+                    
+                    alpha = max(0.3, self._energy_history[i])
+                    
+                    self.create_rectangle(
+                        x + gap, self.height - 15 - bar_height,
+                        x + bar_width - gap, self.height - 15,
+                        fill=color, outline='', tags='bar'
+                    )
+        else:
+            for i in range(len(self.DIRECTIONS)):
+                self._energy_history[i] *= 0.7
+                bar_height = int(self._energy_history[i] * (self.height - 25))
+                if bar_height > 0:
+                    x = i * bar_width
+                    self.create_rectangle(
+                        x + gap, self.height - 15 - bar_height,
+                        x + bar_width - gap, self.height - 15,
+                        fill=COLORS['text_dim'], outline='', tags='bar'
+                    )
+
+
 class CompassWidget(tk.Canvas):
     """
     罗盘显示组件
@@ -227,16 +337,20 @@ class EchoCompassApp:
         self.root = tk.Tk()
         self.root.title(title)
         self.root.configure(bg=COLORS['bg'])
-        self.root.resizable(False, False)
+        self.root.resizable(True, False)
         
         self._build_ui()
         
         self._data = CompassData()
     
     def _build_ui(self):
+        # 顶部 8 方位显示条
+        self.edge_display = EdgeDisplay(self.root, height=50)
+        self.edge_display.pack(fill='x', padx=10, pady=(10, 5))
+        
         # 标题
         title_frame = tk.Frame(self.root, bg=COLORS['bg'])
-        title_frame.pack(fill='x', padx=20, pady=(15, 5))
+        title_frame.pack(fill='x', padx=20, pady=(0, 5))
         
         tk.Label(title_frame, text='回声罗盘', bg=COLORS['bg'], fg=COLORS['text'],
                  font=('Microsoft YaHei', 18, 'bold')).pack(side='left')
@@ -289,6 +403,7 @@ class EchoCompassApp:
         self.status_var.set(text)
     
     def _update_ui(self):
+        self.edge_display.update_data(self._data)
         self.compass.update_data(self._data)
         self.info.update_data(self._data)
     
