@@ -22,6 +22,7 @@ COLORS = {
     'gunshot': '#f85149',       # 红色 = 枪声
     'other': '#d2a8ff',         # 紫色 = 其他
     'direction_indicator': '#58a6ff',
+    'warning': '#f0883e',       # 橙色 = 警告/后方
 }
 
 
@@ -235,6 +236,16 @@ class CompassWidget(tk.Canvas):
             glow_size = size * 2
             self.create_oval(x - glow_size, y - glow_size, x + glow_size, y + glow_size,
                              outline=color, width=2, tags='glow')
+        
+        # 前后方向指示
+        if hasattr(data, 'front_back') and data.front_back:
+            self.create_text(c, c + r + 12, text='后', fill=COLORS['warning'], font=('Arial', 10, 'bold'))
+            self.create_text(c, c - r - 12, text='前', fill=COLORS['text_dim'], font=('Arial', 10))
+            arrow_size = 10
+            self.create_polygon(c, c + r - arrow_size,
+                               c - arrow_size/2, c + r - arrow_size*2,
+                               c + arrow_size/2, c + r - arrow_size*2,
+                               fill=COLORS['warning'], tags='back_arrow')
 
 
 class InfoPanel(tk.Frame):

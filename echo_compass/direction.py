@@ -221,11 +221,13 @@ def analyze_audio_block(audio_block, method='weighted'):
             'energies': energies,
         }
     
-    # 自动选择算法：2 声道用双耳，8 声道用多声道
     n_channels = audio_block.shape[1] if len(audio_block.shape) > 1 else 1
+    
+    front_back = 0.0
     
     if n_channels == 2:
         angle, confidence = calc_direction_binaural(audio_block)
+        front_back = _detect_front_back(audio_block)
     elif method == 'beamforming':
         angle, confidence = calc_direction_beamforming(energies)
     else:
@@ -240,6 +242,7 @@ def analyze_audio_block(audio_block, method='weighted'):
         'confidence': float(confidence),
         'total_energy': float(total_energy),
         'energies': energies,
+        'front_back': float(front_back),
     }
 
 
@@ -277,9 +280,120 @@ def _simple_highpass(signal, cutoff_hz, sample_rate):
     return result
 
 
+def _detect_reverberation(audio_block, sample_rate=48000):
+    """检测混响：计算直达声与混响能量比"""
+    if len(audio_block.shape) > 1:
+        mono = np.mean(audio_block, axis=1)
+    else:
+        mono = audio_block
+    
+    n_samples = len(mono)
+    
+    onset_win = int(sample_rate * 0.005)
+    tail_start = int(sample_rate * 0.015)
+    
+    if n_samples <= tail_start:
+        return 0.0
+    
+    direct_energy = np.mean(mono[:onset_win] ** 2)
+    tail_energy = np.mean(mono[tail_start:] ** 2)
+    
+    if direct_energy < 1e-10:
+        return 1.0
+    
+    reverb_ratio = tail_energy / direct_energy
+    return min(reverb_ratio, 3.0)
+
+
+def _detect_clipping(audio_block):
+    """检测削顶：信号是否接近最大幅值"""
+    max_val = np.max(np.abs(audio_block))
+    return max_val > 0.85
+
+
+def _detect_front_back(audio_block, sample_rate=48000):
+    """
+    前后方向判断：基于 HRTF 频谱特征
+    
+    HRTF 前方特征：
+    - 耳壳共振峰在 5-10kHz 区域明显
+    - 高频衰减较小
+    
+    HRTF 后方特征：
+    - 耳壳共振峰被抑制
+    - 高频衰减更大
+    - 频谱包络更平坦
+    
+    返回: 正=前方倾向, 负=后方倾向, 绝对值=置信度
+    """
+    if len(audio_block.shape) > 1:
+        mono = np.mean(audio_block, axis=1)
+    else:
+        mono = audio_block
+    
+    n_samples = len(mono)
+    if n_samples < 64:
+        return 0.0
+    
+    fft = np.abs(np.fft.rfft(mono))
+    freqs = np.fft.rfftfreq(n_samples, 1.0 / sample_rate)
+    
+    front_score = 0.0
+    back_score = 0.0
+    
+    # 5-8kHz 共振峰区域（前方更明显）
+    mid_high_mask = (freqs >= 5000) & (freqs <= 8000)
+    mid_high_energy = np.sum(fft[mid_high_mask] ** 2)
+    
+    # 8-12kHz 区域（前方更强）
+    high_mask = (freqs >= 8000) & (freqs <= 12000)
+    high_energy = np.sum(fft[high_mask] ** 2)
+    
+    # 2-4kHz 区域（参考基准）
+    mid_mask = (freqs >= 2000) & (freqs <= 4000)
+    mid_energy = np.sum(fft[mid_mask] ** 2)
+    
+    total_energy = np.sum(fft ** 2)
+    
+    if mid_energy < 1e-10 or total_energy < 1e-10:
+        return 0.0
+    
+    # 前方特征：高频相对能量高
+    high_ratio = high_energy / mid_energy
+    mid_high_ratio = mid_high_energy / mid_energy
+    
+    # 计算频谱平坦度（后方更平坦）
+    geometric_mean = np.exp(np.mean(np.log(np.maximum(fft[mid_high_mask], 1e-10))))
+    arithmetic_mean = np.mean(fft[mid_high_mask])
+    flatness = geometric_mean / arithmetic_mean if arithmetic_mean > 1e-10 else 0
+    
+    if high_ratio > 0.8:
+        front_score += 2.0
+    elif high_ratio > 0.5:
+        front_score += 1.0
+    
+    if mid_high_ratio > 1.2:
+        front_score += 1.5
+    elif mid_high_ratio > 0.8:
+        front_score += 0.5
+    
+    if flatness > 0.3:
+        back_score += 1.5
+    elif flatness > 0.2:
+        back_score += 0.8
+    
+    if high_ratio < 0.3:
+        back_score += 1.5
+    
+    score_diff = front_score - back_score
+    max_score = max(front_score, back_score, 1.0)
+    
+    return score_diff / max_score
+
+
 def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=3):
     """
-    双耳方向计算：高频 ILD 为主，简化计算降低延迟
+    双耳方向计算：高频 ILD 为主，增加反射/混响/削顶检测
 
     参数:
         audio_block: (n_samples, 2) 立体声音频
@@ -297,6 +411,9 @@ def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=3):
     right = audio_block[:, 1].astype(np.float64)
 
     n_samples = len(left)
+
+    is_clipped = _detect_clipping(audio_block)
+    reverb_ratio = _detect_reverberation(audio_block, sample_rate)
 
     # ---- 找起音点 ----
     win_size = max(1, sample_rate // 1000)
@@ -340,7 +457,6 @@ def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=3):
     if full_energy < 1e-10:
         return 0.0, 0.0
 
-    # 简化高通滤波
     left_hp = _simple_highpass(left_win, ILD_HIGHPASS_HZ, sample_rate)
     right_hp = _simple_highpass(right_win, ILD_HIGHPASS_HZ, sample_rate)
     e_left_hp = np.sqrt(np.mean(left_hp ** 2))
@@ -368,5 +484,14 @@ def calc_direction_binaural(audio_block, sample_rate=48000, onset_window_ms=3):
 
     if not use_hf:
         confidence *= 0.6
+
+    if is_clipped:
+        confidence *= 0.4
+
+    if reverb_ratio > 1.5:
+        confidence *= max(0.3, 1.0 - (reverb_ratio - 1.0) * 0.3)
+
+    if abs(db_diff) < 2:
+        confidence *= 0.5
 
     return float(angle), float(confidence)

@@ -85,6 +85,10 @@ class AudioCaptureThread(threading.Thread):
         self._onset_total_e = 0.0
         self._clip_count = 0
         self._sources = []
+        self._classifier_history = []
+        self._footstep_count = 0
+        self._last_footstep_time = 0.0
+        self._is_behind = False
 
     def set_status_callback(self, cb):
         self._status_callback = cb
@@ -155,6 +159,14 @@ class AudioCaptureThread(threading.Thread):
             conf = analysis['confidence']
             new_angle = analysis['angle']
             
+            front_back = analysis.get('front_back', 0.0)
+            
+            if front_back < -0.3:
+                new_angle += 180
+                self._is_behind = True
+            else:
+                self._is_behind = False
+            
             if not self._direction_locked:
                 if self._last_angle is not None:
                     diff = angle_diff(self._last_angle, new_angle)
@@ -202,6 +214,7 @@ class AudioCaptureThread(threading.Thread):
         data.energy = min(1.0, e / 0.5)
         data.confidence = self._last_confidence
         data.sound_type = self._last_sound_type
+        data.front_back = self._is_behind
         return data
 
     def run(self):
@@ -319,19 +332,39 @@ class AudioCaptureThread(threading.Thread):
 
                         if analysis['has_sound']:
                             if is_onset:
+                                cls = classify_sound(data)
+                                self._classifier_history.append(cls)
+                                if len(self._classifier_history) > 5:
+                                    self._classifier_history.pop(0)
+                                
+                                gun_count = sum(1 for c in self._classifier_history if c['type'] == 'gunshot' and c['confidence'] > 0.5)
+                                foot_count = sum(1 for c in self._classifier_history if c['type'] == 'footstep' and c['confidence'] > 0.5)
+                                other_count = len(self._classifier_history) - gun_count - foot_count
+                                
+                                current_time = time.time()
+                                if current_time - self._last_footstep_time < 0.5:
+                                    self._footstep_count += 1
+                                else:
+                                    self._footstep_count = 1
+                                self._last_footstep_time = current_time
+                                
                                 if total_db > GUNSHOT_ONSET_DB:
                                     self._event_sound_type = SOUND_TYPE_GUNSHOT
+                                    self._footstep_count = 0
+                                elif total_db > -22 and gun_count >= 2:
+                                    self._event_sound_type = SOUND_TYPE_GUNSHOT
+                                elif self._footstep_count >= 2:
+                                    self._event_sound_type = SOUND_TYPE_FOOTSTEP
+                                elif foot_count >= 3:
+                                    self._event_sound_type = SOUND_TYPE_FOOTSTEP
+                                elif gun_count > foot_count:
+                                    self._event_sound_type = SOUND_TYPE_GUNSHOT
+                                elif foot_count >= gun_count:
+                                    self._event_sound_type = SOUND_TYPE_FOOTSTEP
+                                elif total_db > -22:
+                                    self._event_sound_type = SOUND_TYPE_GUNSHOT
                                 else:
-                                    cls = classify_sound(data)
-                                    if cls['confidence'] > 0.6:
-                                        self._event_sound_type = (SOUND_TYPE_GUNSHOT
-                                                                  if cls['type'] == 'gunshot'
-                                                                  else SOUND_TYPE_FOOTSTEP)
-                                    else:
-                                        if total_db > -22:
-                                            self._event_sound_type = SOUND_TYPE_GUNSHOT
-                                        else:
-                                            self._event_sound_type = SOUND_TYPE_FOOTSTEP
+                                    self._event_sound_type = SOUND_TYPE_FOOTSTEP
                                 self._event_type_locked = True
                             
                             classification = {
@@ -339,6 +372,7 @@ class AudioCaptureThread(threading.Thread):
                                 'confidence': 0.9, 'features': {},
                             }
                         else:
+                            self._classifier_history = []
                             classification = {'type': 'silence', 'confidence': 1.0, 'features': {}}
 
                         now = time.time()

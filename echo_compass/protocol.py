@@ -37,6 +37,7 @@ class CompassData:
     sound_type: int = SOUND_TYPE_SILENCE  # 0=静音 1=脚步 2=枪声 3=其他
     energy: float = 0.0      # 总能量 0~1
     confidence: float = 0.0  # 方向置信度 0~1
+    front_back: float = 0.0  # 前后方向: 正=前, 负=后, 绝对值=置信度
 
     def normalize_angle(self):
         """角度归一化到 0~360"""
