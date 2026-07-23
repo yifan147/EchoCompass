@@ -16,6 +16,7 @@ from echo_compass.direction import analyze_audio_block
 from echo_compass.classifier import classify_sound
 from echo_compass.protocol import CompassData, serialize
 from echo_compass.ui_tk import EchoCompassApp
+from echo_compass.screen_overlay import ScreenOverlay
 from echo_compass.protocol import SOUND_TYPE_FOOTSTEP, SOUND_TYPE_GUNSHOT, SOUND_TYPE_OTHER, SOUND_TYPE_SILENCE
 from echo_compass.web_radar import WebRadarServer, get_local_ip
 
@@ -447,6 +448,8 @@ class SerialSender:
 def main():
     app = EchoCompassApp()
 
+    overlay = ScreenOverlay(app.root)
+
     serial_sender = SerialSender()
 
     status_parts = []
@@ -476,6 +479,7 @@ def main():
 
     def on_data(data: CompassData):
         app.set_data(data)
+        overlay.update_data(data)
         serial_sender.send(data)
         web_server.push({
             'has_sound': data.has_sound,
@@ -496,6 +500,7 @@ def main():
         capture_thread.stop()
         serial_sender.close()
         web_server.stop()
+        overlay.destroy()
 
 
 if __name__ == '__main__':
