@@ -1,0 +1,57 @@
+name: Build EchoCompass
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --windowed `
+            --name EchoCompass `
+            --collect-all soundcard `
+            --collect-all numpy `
+            --collect-all serial `
+            --hidden-import tkinter `
+            --hidden-import http.server `
+            --hidden-import json `
+            --hidden-import queue `
+            --hidden-import threading `
+            main.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoCompass-windows
+          path: dist/EchoCompass.exe
+
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: EchoCompass v1.0.${{ github.run_number }}
+          files: dist/EchoCompass.exe
+          draft: false
+          prerelease: false

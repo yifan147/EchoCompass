@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.zip
+*.wav
+*.npy
+debug.log
+recordings/
+voicemeeter/
+get-pip.py
