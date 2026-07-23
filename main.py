@@ -12,11 +12,12 @@ import numpy as np
 
 warnings.filterwarnings('ignore', message='data discontinuity in recording')
 
-from echo_compass.direction import analyze_audio_block
+from echo_compass.direction import analyze_audio_block, calc_direction_weighted, CHANNEL_ANGLES
 from echo_compass.classifier import classify_sound
 from echo_compass.protocol import CompassData, serialize
 from echo_compass.ui_tk import EchoCompassApp
 from echo_compass.screen_overlay import ScreenOverlay
+from echo_compass.audio_manager import AudioDeviceManager, Virtual71Decoder
 from echo_compass.protocol import SOUND_TYPE_FOOTSTEP, SOUND_TYPE_GUNSHOT, SOUND_TYPE_OTHER, SOUND_TYPE_SILENCE
 from echo_compass.web_radar import WebRadarServer, get_local_ip
 
@@ -183,6 +184,18 @@ class AudioCaptureThread(threading.Thread):
             
             self._add_source(self._smooth_angle, self._env_energy, 
                            self._event_sound_type, conf)
+            
+            energies = analysis.get('energies', None)
+            if energies is not None and len(energies) >= 8:
+                for ch in range(8):
+                    if ch == 3:
+                        continue
+                    ch_angle = CHANNEL_ANGLES[ch]
+                    ch_energy = energies[ch]
+                    if ch_energy > 0.01:
+                        if ch_angle < 0:
+                            ch_angle += 360
+                        self._add_source(ch_angle, ch_energy, self._event_sound_type, conf)
         else:
             hold_sec = HOLD_SEC_GUNSHOT if self._event_sound_type == SOUND_TYPE_GUNSHOT else HOLD_SEC_FOOTSTEP
             if now - self._last_event_time > hold_sec:
@@ -221,48 +234,46 @@ class AudioCaptureThread(threading.Thread):
     def run(self):
         self._running = True
         
-        try:
-            import soundcard as sc
-        except ImportError:
-            self._status('错误: soundcard 库未安装')
+        audio_manager = AudioDeviceManager()
+        virtual_decoder = Virtual71Decoder()
+        
+        if not audio_manager.initialize():
+            self._status('错误: 无法初始化音频管理器')
             return
-
-        try:
-            all_mics = sc.all_microphones(include_loopback=True)
-            loopback = None
-
-            try:
-                default_speaker_name = sc.default_speaker().name
-                for m in all_mics:
-                    if m.isloopback and m.name == default_speaker_name:
-                        loopback = m
-                        break
-            except Exception:
-                pass
-
-            if loopback is None:
-                for m in all_mics:
-                    if m.isloopback:
-                        loopback = m
-                        break
-
-            if loopback is None:
-                self._status('错误: 未找到 WASAPI Loopback 设备')
-                return
-
-            channels = min(2, loopback.channels)
-            self._status(f'捕获: {loopback.name} ({channels} 声道, 双耳模式)')
-
-        except Exception as e:
-            self._status(f'错误: 无法初始化音频设备 - {e}')
+        
+        devices = audio_manager.get_loopback_devices()
+        if devices:
+            self._status(f'检测到 {len(devices)} 个音频输出设备')
+        
+        best_device = audio_manager.get_best_device()
+        if best_device is None:
+            self._status('错误: 未找到可用的音频捕获设备')
             return
+        
+        audio_manager.select_device(best_device['id'])
+        
+        device_info = audio_manager.get_device_info()
+        n_channels = device_info['channels']
+        
+        mode = '双耳模式'
+        if n_channels >= 8:
+            mode = '7.1环绕声模式'
+        elif n_channels >= 6:
+            mode = '5.1环绕声模式'
+        elif n_channels >= 4:
+            mode = '四声道模式'
+        
+        self._status(f'捕获: {device_info["name"]} ({n_channels} 声道, {mode})')
 
         blocksize = int(self.sample_rate * BLOCK_MS / 1000)
 
-        try:
-            with loopback.recorder(samplerate=self.sample_rate, channels=channels,
-                                    blocksize=blocksize) as rec:
+        rec = audio_manager.create_recorder(sample_rate=self.sample_rate, block_ms=BLOCK_MS)
+        if rec is None:
+            self._status('错误: 无法创建音频录制器')
+            return
 
+        try:
+            with rec:
                 last_update = 0
                 update_interval = 1.0 / UPDATE_HZ
 
@@ -274,7 +285,33 @@ class AudioCaptureThread(threading.Thread):
                             time.sleep(0.01)
                             continue
 
-                        analysis = analyze_audio_block(data, method='weighted')
+                        if n_channels >= 8:
+                            energies = virtual_decoder.extract_channel_energies(data)
+                            angle, confidence = calc_direction_weighted(energies)
+                            
+                            analysis = {
+                                'has_sound': np.sum(energies) > 1e-8,
+                                'angle': angle,
+                                'distance': 0.5,
+                                'confidence': confidence,
+                                'total_energy': np.sum(energies),
+                                'energies': energies,
+                                'front_back': 0.0,
+                            }
+                        elif n_channels == 2:
+                            analysis = analyze_audio_block(data, method='weighted')
+                        else:
+                            energies = virtual_decoder.extract_channel_energies(data)
+                            angle, confidence = calc_direction_weighted(energies)
+                            analysis = {
+                                'has_sound': np.sum(energies) > 1e-8,
+                                'angle': angle,
+                                'distance': 0.5,
+                                'confidence': confidence,
+                                'total_energy': np.sum(energies),
+                                'energies': energies,
+                                'front_back': 0.0,
+                            }
 
                         total_e = analysis['total_energy']
                         total_db = 20 * np.log10(total_e + 1e-10)
